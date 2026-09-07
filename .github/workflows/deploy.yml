@@ -1,0 +1,62 @@
+# Builds the marimo WASM widget and publishes it to GitHub Pages on every push.
+name: Deploy widget to Pages
+
+# NOTE: repo is private for now; GitHub Pages needs a public repo (free plan),
+# so auto-deploy on push is disabled to avoid failing Pages jobs. Re-enable by
+# uncommenting the push trigger once the repo is public and Pages is on.
+on:
+  # push:
+  #   branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build + test dependencies
+        run: pip install marimo numpy matplotlib
+
+      - name: Run the model tests
+        run: python tests.py          # a failing model must not reach students
+
+      - name: Export the widget to WASM
+        run: python -m marimo export html-wasm app.py -o build --mode run
+
+      # REQUIRED. marimo bundles the NOTEBOOK, not the modules it imports, so
+      # spatial.py and render.py are absent from build/ and `import spatial`
+      # fails in the browser -- silently, as a blank page. app.py fetches them
+      # at runtime from alongside index.html, so they have to be here.
+      - name: Copy the model modules next to index.html
+        run: cp spatial.py render.py build/
+
+      - name: Fail if the modules are missing
+        run: test -s build/spatial.py && test -s build/render.py
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: build
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

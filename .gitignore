@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+build/
+.marimo/
+.DS_Store
