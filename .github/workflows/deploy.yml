@@ -25,7 +25,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install build + test dependencies
-        run: pip install marimo numpy matplotlib
+        # uv is required by marimo's html-wasm export to resolve the local
+        # imports (spatial.py, render.py) into the bundle.
+        run: pip install marimo numpy matplotlib uv
 
       - name: Run the model tests
         run: python tests.py          # a failing model must not reach students
