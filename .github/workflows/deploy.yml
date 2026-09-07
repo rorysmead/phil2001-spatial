@@ -1,12 +1,9 @@
 # Builds the marimo WASM widget and publishes it to GitHub Pages on every push.
 name: Deploy widget to Pages
 
-# NOTE: repo is private for now; GitHub Pages needs a public repo (free plan),
-# so auto-deploy on push is disabled to avoid failing Pages jobs. Re-enable by
-# uncommenting the push trigger once the repo is public and Pages is on.
 on:
-  # push:
-  #   branches: [main]
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
