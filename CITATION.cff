@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "PHIL 2001 Spatial Evolution Explorer"
+abstract: "Lattice-based evolutionary game simulator (multiple update rules, realized-assortment readout, arbitrary symmetric games); a teaching tool for PHIL 2001, Ethics and Evolutionary Games, at Northeastern University."
+type: software
+authors:
+  - family-names: Smead
+    given-names: Rory
+    affiliation: "Northeastern University"
+repository-code: "https://github.com/rorysmead/phil2001-spatial"
+url: "https://rorysmead.github.io/phil2001-spatial/"
+license: MIT

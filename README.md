@@ -29,3 +29,12 @@ marimo run app.py       # the widget
 `spatial.py` (model) · `render.py` (plots) · `app.py` (widget) · `notebook.ipynb` (Colab) · `tests.py` (checks).
 
 Build record, design rationale, reproduced results, and deployment notes: [`NOTES.md`](NOTES.md).
+
+
+## License
+
+MIT (c) 2026 Rory Smead and contributors. See [LICENSE](LICENSE). Contributions are welcome under the same license, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Citation
+
+If you use this tool in teaching or research, please cite it. See [CITATION.cff](CITATION.cff), or use the "Cite this repository" button on GitHub.
