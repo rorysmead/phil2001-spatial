@@ -390,22 +390,28 @@ _TEMPLATE = r"""<!doctype html>
     drawLattice(); drawPlot(FP); drawPlot(AP); drawNumbers();
   }
   function go(g) { frame = Math.max(0, Math.min(LAST, g)); render(); }
+  // Playback runs on a plain timer, not requestAnimationFrame: some hosts stop
+  // delivering animation frames to an embedded page they consider off-screen,
+  // and a player that silently freezes is worse than one that is throttled.
+  let timer = null;
   function setPlaying(p) {
     playing = p && LAST > 0;
     $("play").innerHTML = playing ? "&#x23F8; Pause" : "&#x25B6; Play";
-    if (playing) { lastTick = 0; requestAnimationFrame(tick); }
+    clearTimeout(timer); timer = null;
+    if (playing) { lastTick = performance.now(); timer = setTimeout(tick, 0); }
   }
-  function tick(t) {
+  function tick() {
     if (!playing) return;
-    const interval = 1000 / Number($("speed").value);
-    if (!lastTick) lastTick = t;
+    const interval = 1000 / Number($("speed").value), t = performance.now();
     if (t - lastTick >= interval) {
-      const steps = Math.min(LAST - frame, Math.floor((t - lastTick) / interval));
-      lastTick += steps * interval;
-      go(frame + Math.max(steps, 1));
+      // catch up if the timer ran late, but never by more than a few frames
+      const steps = Math.min(LAST - frame, Math.max(1, Math.min(4,
+                             Math.floor((t - lastTick) / interval))));
+      lastTick = Math.max(lastTick + steps * interval, t - interval);
+      go(frame + steps);
       if (frame >= LAST) { setPlaying(false); return; }   // stop at the end
     }
-    requestAnimationFrame(tick);
+    timer = setTimeout(tick, Math.max(0, interval - (performance.now() - lastTick)));
   }
   $("play").onclick = () => {
     if (!playing && frame >= LAST) go(0);                 // play again from the start
