@@ -371,6 +371,9 @@ _TEMPLATE = r"""<!doctype html>
       side = Math.max(160, Math.min(MAX_SIDE, W - 2));
       sideW = Math.min(520, W);
     }
+    // a frame laid out while hidden reports width 0; a zero-size canvas makes
+    // drawImage throw, so keep a floor and relayout when the width arrives
+    sideW = Math.max(200, sideW);
     $("side").style.width = sideW + "px";
     layoutPlot(FP, sideW, 200);
     layoutPlot(AP, sideW, 160);
