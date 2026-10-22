@@ -49,7 +49,7 @@ MAP OF THIS FILE  (sections are banner-commented below)
 ------------------------------------------------------------------------------
     1. Geometry              lattices, neighbourhoods, shifting the grid
     2. Payoffs               what each cell earns from its neighbours
-    3. Update rules          the five ways a cell can revise its strategy
+    3. Update rules          the seven ways a cell can revise its strategy
     4. Scheduling            synchronous / random subset / sequential; mutation
     5. Model and Sim         the objects you actually use
     6. Measurement           frequencies, realized assortment, frozen states
@@ -183,8 +183,9 @@ def neighbour_stack(a, offsets, wrap):
 #   payoff_mode="average"  divide by the number of neighbours
 #
 # On a wrapped lattice every cell has the same number of neighbours, so the two
-# differ only by a constant factor -- and every update rule here is invariant to
-# a positive rescaling, so THE CHOICE DOES NOT MATTER on a torus. On a BOUNDED
+# differ only by a constant factor -- and every update rule here except `fermi`
+# is invariant to a positive rescaling, so THE CHOICE DOES NOT MATTER on a torus
+# (for `fermi` it rescales beta; see its docstring). On a BOUNDED
 # lattice it matters a great deal: with "total", a corner cell with 3 neighbours
 # is being compared to an interior cell with 8, and the comparison is mostly
 # measuring the boundary. Use "average" when the lattice has edges. (This is the
@@ -239,7 +240,7 @@ def payoff_field(grid, A, offsets, wrap, payoff_mode="total", self_play=False):
 
 
 # ------------------------------------------------------------------------------
-# 3. Update rules: the five ways a cell can revise its strategy
+# 3. Update rules: the seven ways a cell can revise its strategy
 # ------------------------------------------------------------------------------
 #
 # A rule takes the current grid plus the payoffs computed in section 2 and
@@ -329,8 +330,14 @@ def _roulette(weights, valid, rng):
     # all-zero weights (everyone tied at the bottom): fall back to uniform
     w = np.where(total[None] > 0, w, valid.astype(float))
     total = w.sum(axis=0)
-    u = rng.random(total.shape) * total
-    idx = (np.cumsum(w, axis=0) < u[None]).sum(axis=0)
+    # draw against the cumulative sum's own last entry, not `total`: the two can
+    # differ in the last bit, and a draw that lands past the cumsum would pick the
+    # final entry even when it has zero weight (an off-grid neighbour)
+    cum = np.cumsum(w, axis=0)
+    u = rng.random(total.shape) * cum[-1]
+    idx = (cum < u[None]).sum(axis=0)
+    # a zero draw would otherwise select entry 0 whatever its weight
+    idx = np.where(u > 0, idx, (w > 0).argmax(axis=0))
     return np.clip(idx, 0, w.shape[0] - 1)
 
 
@@ -428,8 +435,9 @@ def rule_proportional_imit(grid, pf, model, rng):
     """Compare with one random neighbour; copy with probability ~ the gap.
 
     Adopt neighbour j's strategy with probability max(0, payoff_j - payoff_i)/D,
-    where D is the largest payoff difference the game can produce, so that the
-    probability is well defined. Never copies someone who did worse.
+    where D is the largest payoff difference two sites can show (see
+    `Model.max_payoff_gap`), so that the probability is well defined. Never
+    copies someone who did worse.
 
     This is the rule whose well-mixed limit is the REPLICATOR DYNAMIC. Run it
     here on a lattice, run the replicator explorer on the same payoff matrix,
@@ -488,6 +496,13 @@ def rule_death_birth(grid, pf, model, rng):
     everything at every b/c. Turn selection down and cooperation appears and
     rises with b/c, as the condition would suggest.
 
+    That table is WITHOUT self-interaction (self_play=False, the Model default).
+    Self-play pays every cooperator an extra b - c and every defector 0, and it
+    reverses the full-strength column: at b/c = 8 and w = 1, cooperators reach
+    0.73 and 0.79 on two seeds (0.32 and 0.30 at w = 0.02). The widget turns
+    self-play on by default for Nowak & May, so switch it off before comparing
+    with this table.
+
     DO NOT READ THAT TABLE AS A REPLICATION. Ohtsuki et al.'s claim is about a
     FIXATION PROBABILITY -- a single cooperative mutant fixes more often than a
     neutral one, ρ_C > 1/N -- and what is tabulated above is a frequency at
@@ -532,8 +547,10 @@ def rule_death_selection(grid, pf, model, rng):
     rule is invariant to rescaling payoffs, and it is well defined when every
     payoff is negative -- which matters for the spite game, where they are.
 
-    When the whole neighbourhood is tied there is nothing for selection to act
-    on and nobody dies. So a monomorphic lattice is absorbing, as it should be.
+    When the whole neighbourhood is tied, standing is set to 1, so the site dies
+    with probability death_rate * (1 - w): never at w = 1, sometimes below it. A
+    monomorphic lattice is absorbing either way, because the replacement is a
+    copy of a neighbour playing the same strategy.
 
     Then the empty site is filled by a copy of a UNIFORMLY RANDOM neighbour --
     birth is blind here.
@@ -622,8 +639,8 @@ RULE_NOTES = {
 #                  middle, and it is cheap.
 #   "sequential"   cells revise ONE AT A TIME in random order, each seeing the
 #                  updates already made this sweep. The strictest asynchronous
-#                  updating. It is slow (one full recomputation per cell), so
-#                  keep the lattice small when you use it.
+#                  updating. See `sequential_layers` for how it is computed
+#                  without one full recomputation per cell.
 #
 # Compare "synchronous" and "sequential" on the Nowak-May Prisoner's Dilemma and
 # you reproduce the Huberman-Glance (1993) objection in about thirty seconds.
@@ -643,6 +660,68 @@ RULE_NOTES = {
 # absorbing states and is what makes long-run frequencies meaningful.
 
 SCHEDULES = ("synchronous", "subset", "sequential")
+
+
+def dependency_offsets(offsets):
+    """Offsets of every site whose strategy can affect a site's revision.
+
+    A site's proposal reads the payoffs of itself and its neighbours, and each of
+    those payoffs reads that site's own neighbours. So it depends on strategies
+    up to two neighbourhood steps away: the set (N + {0}) + (N + {0}), minus the
+    site itself. The set is symmetric, so "x reads y" and "y reads x" coincide.
+    """
+    closed = [(0, 0)] + list(offsets)
+    out = {(a + c, b + d) for a, b in closed for c, d in closed}
+    out.discard((0, 0))
+    return sorted(out)
+
+
+def sequential_layers(order, model):
+    """Group a sequential sweep into batches that can be revised at once.
+
+    `order` is the random revision order (a permutation of the flat site
+    indices). Revising sites one at a time is slow: each revision recomputes the
+    whole lattice to change one site. But two sites more than two neighbourhood
+    steps apart cannot affect each other's revision (`dependency_offsets`), so
+    the order between them does not matter. Only the order between NEARBY sites
+    does.
+
+    So give each site a layer: 0 if no nearby site comes before it in `order`,
+    otherwise one more than the highest layer among the nearby sites that do.
+    Revising layer 0 all at once, then layer 1, and so on, gives exactly the
+    sweep in `order`. Every nearby site that comes earlier is in an earlier
+    layer, so its update has already happened. Every nearby site that comes
+    later is in the same or a later layer, so its update has not. Sites in one
+    layer are never nearby. tests.py checks the equivalence site for site.
+
+    On a 100x100 lattice a random order needs about 27 layers under von
+    Neumann (4), 48 under Moore (8) and 130 under Moore r=2, so a sweep costs
+    that many whole-lattice recomputations instead of 10,000. (Moore-8: about
+    0.1-0.2 s per generation instead of 16 s; Moore r=2: about 1-2 s.)
+
+    The sweep is the same PROCESS as revising one site at a time, and the same
+    result site for site given the same random draws per site. It is not the
+    same random STREAM as the one-site-per-recomputation code it replaced, so a
+    sequential run from a seed (or a shared link) made before 2026-10-22
+    replays differently. Synchronous and subset runs are unaffected.
+    """
+    n = model.rows * model.cols
+    rank = np.empty(n, np.int64)
+    rank[np.asarray(order)] = np.arange(n)
+    rank = rank.reshape(model.shape)
+    offs = dependency_offsets(model.offsets)
+    nb_rank, nb_valid = neighbour_stack(rank, offs, model.wrap)
+    # a site on a small torus can be its own dependency; rank < rank excludes it
+    earlier = nb_valid & (nb_rank < rank[None])
+    layer = np.zeros(model.shape, np.int64)
+    # iteration t fixes every site whose chain of earlier neighbours has length
+    # t, so the loop ends after (number of layers) passes
+    while True:
+        nb_layer, _ = neighbour_stack(layer, offs, model.wrap)
+        new = np.where(earlier, nb_layer + 1, 0).max(axis=0)
+        if np.array_equal(new, layer):
+            return layer
+        layer = new
 
 
 def _mutate(grid, k, mu, rng):
@@ -689,6 +768,11 @@ class Model:
             raise ValueError("A must be a square payoff matrix")
         if self.A.shape[0] < 2:
             raise ValueError("need at least 2 strategies")
+        if self.A.shape[0] > 127:
+            # stored lattices are int8; a strategy index of 128 would wrap negative
+            raise ValueError("at most 127 strategies")
+        if not np.isfinite(self.A).all():
+            raise ValueError("every payoff must be a finite number")
         if self.neighbourhood not in NEIGHBOURHOODS:
             raise ValueError(f"unknown neighbourhood {self.neighbourhood!r}")
         if self.rule not in RULES:
@@ -757,12 +841,33 @@ class Model:
 
     def max_payoff_gap(self):
         """Largest payoff difference two sites can show. Used to normalise the
-        local-replicator switching probability so it stays in [0, 1]."""
-        spread = float(self.A.max() - self.A.min())
-        if spread <= 0:
+        local-replicator switching probability so it stays in [0, 1].
+
+        With average payoffs it is the spread of the matrix. With total payoffs
+        on a torus every site has n partners, so it is n times the spread. With
+        total payoffs on a BOUNDED lattice sites have between n_min and n
+        partners, and a site's total runs from m * min(A) to m * max(A) for its
+        own m. Multiplying the spread by n then understates the gap (with all
+        payoffs positive, a corner earning little sits further below a busy
+        interior site than n * spread), and the probability would clip at 1.
+        """
+        lo, hi = float(self.A.min()), float(self.A.max())
+        if hi - lo <= 0:
             return 1.0
-        n = self.n_neighbours + (1 if self.self_play else 0)
-        return spread if self.payoff_mode == "average" else spread * n
+        if self.payoff_mode == "average":
+            return hi - lo
+        extra = 1 if self.self_play else 0
+        n = self.n_neighbours + extra
+        if self.wrap:
+            return (hi - lo) * n
+        n_min = self.min_partners()
+        return max(n * hi, n_min * hi) - min(n * lo, n_min * lo)
+
+    def min_partners(self):
+        """Fewest partners any site has (corners of a bounded lattice)."""
+        _, valid = neighbour_stack(np.zeros(self.shape, np.int8), self.offsets,
+                                   self.wrap)
+        return int(valid.sum(axis=0).min()) + (1 if self.self_play else 0)
 
 
 class Sim:
@@ -814,20 +919,20 @@ class Sim:
             revising = self.rng.random(self.grid.shape) < m.update_prob
             new = np.where(revising, proposed, self.grid)
         else:  # "sequential": one site at a time, each seeing the updates so far
+            # revised in layers of mutually distant sites, which is exactly the
+            # one-at-a-time sweep in `order` (see sequential_layers); the rules
+            # run through the same code path as above
             new = self.grid.copy()
-            n = new.size
-            order = self.rng.permutation(n)
-            for flat in order:
-                r, c = divmod(int(flat), m.cols)
-                # recompute from the CURRENT (partly updated) grid, then keep
-                # only this one site's proposal -- same code path as above, so
-                # the rules are implemented exactly once
-                new[r, c] = self._propose(new)[r, c]
+            order = self.rng.permutation(new.size)
+            layers = sequential_layers(order, m)
+            for layer in range(int(layers.max()) + 1):
+                here = layers == layer
+                new = np.where(here, self._propose(new), new)
         self.grid = _mutate(new, m.k, m.mutation, self.rng)
         self.generation += 1
         self.history.append(self.snapshot())
         if self.keep_grids:
-            self.grids.append(self.grid.astype(np.int8))   # int8: 16 strategies max
+            self.grids.append(self.grid.astype(np.int8))   # int8: 127 strategies max
         return self.grid
 
     def run(self, generations, stop_when_frozen=False):
@@ -856,9 +961,8 @@ class Sim:
     def at(self, generation):
         """A read-only view of this run as it stood at `generation`.
 
-        Lets a front-end run the simulation ONCE and then scrub back and forth
-        through it, instead of re-running from the seed every time the display
-        moves. Needs keep_grids=True.
+        Lets you run the simulation ONCE and then look at (or draw) any earlier
+        generation, instead of re-running from the seed. Needs keep_grids=True.
         """
         if not self.grids:
             raise ValueError("no stored lattices -- build the Sim with keep_grids=True")
@@ -1057,8 +1161,13 @@ _CONFIG_FIELDS = ("rows", "cols", "neighbourhood", "wrap", "payoff_mode",
 
 
 def config_to_dict(model, seed=0, init="random", probs=None, names=None,
-                   label=None):
-    """A plain-dict description of a complete, reproducible run."""
+                   label=None, patch=None, generations=None):
+    """A plain-dict description of a complete, reproducible run.
+
+    `patch` (the side of the "patch" block) and `generations` (how long the run
+    was) are not part of the model, but a link that drops them reproduces a
+    different run: a 9x9 patch comes back as the default 5x5.
+    """
     d = {f: getattr(model, f) for f in _CONFIG_FIELDS}
     d["A"] = np.asarray(model.A, float).tolist()
     d["seed"] = int(seed)
@@ -1069,35 +1178,53 @@ def config_to_dict(model, seed=0, init="random", probs=None, names=None,
         d["names"] = list(names)     # so a shared Lewis link still says "01|01"
     if label is not None:
         d["label"] = str(label)
+    if patch is not None:
+        d["patch"] = int(patch)
+    if generations is not None:
+        d["generations"] = int(generations)
     return d
 
 
 def config_from_dict(d):
-    """Rebuild (model, seed, init, probs, names, label) from `config_to_dict`."""
+    """Rebuild a run from `config_to_dict`.
+
+    Returns (model, seed, init, probs, names, label, extras), where `extras`
+    holds whichever of "patch" and "generations" the config carried (links made
+    before they were recorded have neither).
+    """
     d = dict(d)
     seed = int(d.pop("seed", 0))
     init = d.pop("init", "random")
+    if init not in INITIAL_CONDITIONS:
+        raise ValueError(f"unknown init {init!r}")
     probs = d.pop("probs", None)
     names = d.pop("names", None)
     label = d.pop("label", None)
+    if label is not None:
+        label = str(label)
+    extras = {key: int(d.pop(key)) for key in ("patch", "generations") if key in d}
     model = Model(**d)
+    if probs is not None and len(probs) != model.k:
+        probs = None
+    # a names list of the wrong length would index past its end downstream
     if names is not None:
-        names = tuple(names)[:model.k]
-    return model, seed, init, probs, names, label
+        names = tuple(str(n) for n in names) if len(names) == model.k else None
+    return model, seed, init, probs, names, label, extras
 
 
 def encode_config(model, seed=0, init="random", probs=None, names=None,
-                  label=None):
+                  label=None, patch=None, generations=None):
     """Pack a run into one URL-safe string."""
     import base64
     import json
-    raw = json.dumps(config_to_dict(model, seed, init, probs, names, label),
+    raw = json.dumps(config_to_dict(model, seed, init, probs, names, label,
+                                    patch, generations),
                      separators=(",", ":")).encode()
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
 def decode_config(text):
-    """Unpack `encode_config`. Returns (model, seed, init, probs, names, label)."""
+    """Unpack `encode_config`. Returns what `config_from_dict` returns."""
     import base64
     import json
     pad = "=" * (-len(text) % 4)
@@ -1302,8 +1429,8 @@ boundary between them for a very long time.
 
 Spite: a Harm player pays c=1 to impose h=3 on its opponent, so
 A[Harm, Refrain] = -1, A[Refrain, Harm] = -3, A[Harm, Harm] = -1-3 = -4. Every
-payoff is negative and the game is not a Prisoner's Dilemma in disguise -- it is
-worth watching under a rule that is shift-invariant (fermi, local replicator)
-and under one that is not (proportional imitation), because the all-negative
-payoffs are exactly where the difference shows up.
+payoff is negative, and the game is not a Prisoner's Dilemma in disguise. The
+all-negative payoffs are what broke GenLab's ratio-based imitation rule. Every
+rule here is shift-invariant on a torus, so they give the same run as the game
+with 4 added to every payoff.
 """

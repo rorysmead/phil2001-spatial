@@ -26,8 +26,12 @@ jobs:
 
       - name: Install build + test dependencies
         # uv is required by marimo's html-wasm export to resolve the local
-        # imports (spatial.py, render.py) into the bundle.
-        run: pip install marimo numpy matplotlib uv
+        # imports into the bundle. marimo is PINNED to the version the widget
+        # was last verified with in a local WASM build: an unpinned upgrade
+        # broke this deploy once (the uv requirement) and can change UI
+        # behaviour the app depends on. Bump it deliberately, after a local
+        # `marimo export html-wasm` check.
+        run: pip install marimo==0.23.14 numpy matplotlib uv
 
       - name: Run the model tests
         run: python tests.py          # a failing model must not reach students
@@ -36,14 +40,15 @@ jobs:
         run: python -m marimo export html-wasm app.py -o build --mode run
 
       # REQUIRED. marimo bundles the NOTEBOOK, not the modules it imports, so
-      # spatial.py and render.py are absent from build/ and `import spatial`
-      # fails in the browser -- silently, as a blank page. app.py fetches them
-      # at runtime from alongside index.html, so they have to be here.
+      # spatial.py, render.py and player.py are absent from build/ and
+      # `import spatial` fails in the browser -- silently, as a blank page.
+      # app.py fetches them at runtime from alongside index.html, so they have
+      # to be here.
       - name: Copy the model modules next to index.html
-        run: cp spatial.py render.py build/
+        run: cp spatial.py render.py player.py build/
 
       - name: Fail if the modules are missing
-        run: test -s build/spatial.py && test -s build/render.py
+        run: test -s build/spatial.py && test -s build/render.py && test -s build/player.py
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

@@ -14,7 +14,7 @@ Lattice-based evolutionary game simulator — a teaching resource for PHIL 2001,
 - Any symmetric game up to 16 strategies, with presets (PD, Stag Hunt, Hawk–Dove, RPS, Nash demand, Lewis signalling, …).
 - Seven update rules (imitation, best response, Fermi, death–birth, death–selection).
 - Realized assortment `r` measured each generation — the same `r` as the replicator tool's slider, so lattice runs cross-check against the well-mixed model.
-- Seeded and shareable (config encodes into the URL); CSV / PNG export.
+- Seeded and shareable (config encodes into the URL); export the run as CSV, as an offline HTML animation, or the lattice as PNG.
 
 ## Run locally
 
@@ -26,7 +26,7 @@ marimo run app.py       # the widget
 
 ## Files
 
-`spatial.py` (model) · `render.py` (plots) · `app.py` (widget) · `notebook.ipynb` (Colab) · `tests.py` (checks).
+`spatial.py` (model) · `render.py` (plots) · `player.py` (in-browser playback) · `app.py` (widget) · `notebook.ipynb` (Colab) · `tests.py` (checks).
 
 Build record, design rationale, reproduced results, and deployment notes: [`NOTES.md`](NOTES.md).
 

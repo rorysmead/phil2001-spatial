@@ -23,12 +23,14 @@ repository name — one command in the "Deploying" section below.)*
 | just want to **explore** with controls | the marimo widget | `app.py` |
 | want to **read and edit** the model | the Colab notebook | `notebook.ipynb` |
 
-Both import the same core:
+Both import the same model core (the widget also uses `player.py` to play runs):
 
 - **`spatial.py`** — the model. Lattices, neighbourhoods, payoffs, seven update rules,
   scheduling, assortment. Heavily commented; this is the file to read first.
 - **`render.py`** — the drawing layer (Matplotlib). No model here.
-- **`tests.py`** — 96 correctness checks. Run `python3 tests.py`.
+- **`player.py`** — plays a finished run in the browser on a canvas (no Matplotlib, no
+  model). The widget uses it so nothing blinks between generations.
+- **`tests.py`** — 136 correctness checks. Run `python3 tests.py`.
 
 ## What it does
 
@@ -70,11 +72,18 @@ Both import the same core:
     random neighbour — selection acts on death). Both take a selection strength `w` from
     full strength down to neutral drift.
 - **Scheduling**: synchronous, random subset (probability `p`), or strictly sequential —
-  and for the birth–death rules the schedule is also *who dies*.
+  and for the birth–death rules the schedule is also *who dies*. Sequential is computed in
+  layers of sites too far apart to affect each other, which is exactly the one-at-a-time
+  sweep (checked site for site in `tests.py`) at about 1/100 of the cost. It is the same
+  process but not the same random stream as the code it replaced (2026-10-22), so a
+  sequential run from an older seed or shared link replays differently. Synchronous and
+  subset runs are unchanged.
 - **Realized assortment `r`**, measured every generation (see below).
 - **Reproducibility**: one seed drives every random choice; the whole configuration encodes
   into a URL so a run can be shared and reproduced site for site.
-- **Export**: the run as CSV, the dashboard as PNG.
+- **Export**: the whole run as CSV; the run as a self-contained HTML animation that plays
+  offline; the lattice at any generation as PNG (the player's *Save picture*); the
+  Matplotlib dashboard as PNG from the notebook (`render.save_run`).
 - Mutation, self-interaction, total-vs-average payoff, and structured or hand-built starting
   lattices (random, single mutant, patch, stripes, checkerboard, halves, or any array).
 
@@ -155,6 +164,10 @@ the rule collapses towards "imitate the best", and defection takes everything at
 Turn selection down and cooperation appears and rises with b/c. See `rule_death_birth`'s
 docstring for the table — and note it is *consistent with* the condition, not a test of it,
 since the published claim is about fixation probability and the table is a frequency.
+The table is **without self-interaction**. The widget turns self-play on by default (for
+Nowak & May), and self-play reverses the full-strength column: it pays each cooperator an
+extra b − c, and at b/c = 8, w = 1 cooperators reach 0.73 and 0.79 on two seeds. Switch it
+off before comparing.
 
 ## Running it
 
@@ -195,17 +208,24 @@ Preview the exact hosted page locally before publishing:
 
 ```bash
 python3 -m marimo export html-wasm app.py -o build --mode run
-cp spatial.py render.py build/          # REQUIRED -- see below
+cp spatial.py render.py player.py build/    # REQUIRED -- see below
 python3 -m http.server --directory build
 ```
 
 ### ⚠ The one non-obvious deployment step
 
-**`marimo export html-wasm` bundles the notebook, not the files it imports.** `spatial.py` and
-`render.py` are *not* copied into the build, so in the browser `import spatial` fails, and the
-failure is silent — you get a blank page and nothing in the console but an RPC timeout. The
-two files must be copied next to `index.html`, which the workflow and the preview command
-above both do.
+**`marimo export html-wasm` bundles the notebook, not the files it imports.** `spatial.py`,
+`render.py` and `player.py` are *not* copied into the build, so in the browser `import spatial`
+fails, and the failure is silent — you get a blank page and nothing in the console but an RPC
+timeout. The three files must be copied next to `index.html`, which the workflow and the
+preview command above both do.
+
+**Do not show the player with `mo.iframe`.** It strips every newline from the tag it builds,
+so the first `//` comment in the player's script comments out the rest and the frame stays
+blank. `player.iframe_html` encodes the newlines instead.
+
+**marimo is pinned in the workflow** (`marimo==0.23.14`, the version last verified in a local
+WASM build). Bump it deliberately, after previewing the build locally with the commands above.
 
 `app.py` also has to fetch them at runtime using the **absolute** URL from
 `mo.notebook_location()`; a relative path resolves against marimo's virtual filesystem and
@@ -243,8 +263,10 @@ simulation runs and draws, and the controls respond.
    neighbourhood makes a cell its own neighbour, twice. These now raise instead of running.
 6. **Moore r=2 actually exists.** GenLab offered it in the menu and silently fell back to
    Moore-8.
-7. **Canvas-style image rendering.** GenLab drew an HTML table of `<td>` elements, which does
-   not scale; a 150×150 lattice is fine here.
+7. **Canvas rendering.** GenLab drew an HTML table of `<td>` elements, which does not scale.
+   The widget draws on a `<canvas>` that is repainted in place, from a run simulated once
+   and shipped to the page compressed, so playback costs no Python and does not flicker.
+   (The first version redrew a Matplotlib PNG every generation, which blinked.)
 8. **Asynchronous updating is a first-class option**, because whether a result survives a
    change of schedule is a question worth asking rather than a setting worth hiding.
 
