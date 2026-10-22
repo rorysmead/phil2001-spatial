@@ -42,6 +42,11 @@ PALETTE = [
 
 def strategy_cmap(k):
     """A colormap that maps strategy index -> its fixed colour."""
+    if k > len(PALETTE):
+        # a shorter colormap than vmin/vmax expect would silently recolour
+        # strategies, so refuse rather than draw a wrong picture
+        raise ValueError(f"only {len(PALETTE)} strategy colours are defined, "
+                         f"not {k}")
     return mcolors.ListedColormap(PALETTE[:k])
 
 

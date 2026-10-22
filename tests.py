@@ -219,6 +219,50 @@ def main():
     ok &= check("sequential schedule runs and keeps the lattice shape",
                 s4.grid.shape == (6, 6) and s4.generation == 3)
 
+    # The sequential sweep is computed in layers of mutually distant sites. It
+    # must equal revising one site at a time in the same order, site for site.
+    # Checked on rules whose only randomness is tie-breaking, with continuous
+    # random payoffs so that ties between different strategies do not occur;
+    # every neighbourhood, wrapped and bounded, including tori small enough for
+    # the dependency set to wrap onto itself.
+    def sweep_one_at_a_time(sim, order):
+        new = sim.grid.copy()
+        for flat in order:
+            r, c = divmod(int(flat), sim.model.cols)
+            new[r, c] = sim._propose(new)[r, c]
+        return new
+
+    def sweep_layered(sim, order):
+        new = sim.grid.copy()
+        layers = sp.sequential_layers(order, sim.model)
+        for layer in range(int(layers.max()) + 1):
+            new = np.where(layers == layer, sim._propose(new), new)
+        return new
+
+    _rng = np.random.default_rng(5)
+    _same, _tried = 0, 0
+    for _t, (_hood, _wrap, _n) in enumerate(
+            [(h, w, n) for h in sp.NEIGHBOURHOODS for w in (True, False) for n in (5, 11)]):
+        _A = _rng.normal(size=(3, 3))
+        for _rule in ("imitate_best", "best_response"):
+            try:
+                _m = sp.Model(A=_A, rows=_n, cols=_n, neighbourhood=_hood, wrap=_wrap,
+                              rule=_rule, self_play=bool(_t % 2))
+            except ValueError:
+                continue                 # e.g. a 5x5 torus is too small for some hoods
+            _s = sp.Sim(_m, seed=_t)
+            _order = np.random.default_rng(_t).permutation(_m.rows * _m.cols)
+            _tried += 1
+            _same += np.array_equal(sweep_one_at_a_time(_s, _order),
+                                    sweep_layered(_s, _order))
+    ok &= check(f"layered sequential sweep equals one-at-a-time ({_same}/{_tried} configs)",
+                _tried > 40 and _same == _tried)
+    _m = sp.Model(A=base.A, rows=100, cols=100, schedule="sequential")
+    _layers = sp.sequential_layers(np.random.default_rng(0).permutation(10000), _m)
+    _nb, _ok = sp.neighbour_stack(_layers, sp.dependency_offsets(_m.offsets), True)
+    ok &= check("no two sites in one sequential layer can affect each other",
+                not ((_nb == _layers[None]) & _ok).any())
+
     s5 = sp.Sim(sp.Model(**{**_fields(base), "mutation": 1.0}), seed=8)
     s5.step()
     ok &= check("mutation rate 1 randomises the whole lattice",
@@ -495,8 +539,9 @@ def main():
     _m_cfg = sp.Model(A=A_lew, rows=30, cols=30, rule="fermi", beta=0.3,
                       schedule="subset", update_prob=0.4, mutation=0.01)
     _txt = sp.encode_config(_m_cfg, seed=99, init="patch",
-                            probs=[1.0] * 16, names=n_lew, label="Lewis")
-    _m2, _s2, _i2, _p2, _n2, _l2 = sp.decode_config(_txt)
+                            probs=[1.0] * 16, names=n_lew, label="Lewis",
+                            patch=9, generations=400)
+    _m2, _s2, _i2, _p2, _n2, _l2, _x2 = sp.decode_config(_txt)
     ok &= check("a shared config round-trips the model, seed and initial condition",
                 approx(_m2.A, _m_cfg.A) and _m2.rule == "fermi"
                 and approx(_m2.beta, 0.3) and _s2 == 99 and _i2 == "patch")
@@ -505,6 +550,108 @@ def main():
     ok &= check("the two runs really are identical after a round trip",
                 np.array_equal(sp.Sim(_m_cfg, seed=99).run(10).grid,
                                sp.Sim(_m2, seed=99).run(10).grid))
+    ok &= check("a shared config keeps the patch size and the run length",
+                _x2 == {"patch": 9, "generations": 400})
+    # a link made before patch and generations were recorded still opens
+    import base64 as _b64
+    import json as _json
+    _old = sp.config_to_dict(_m_cfg, seed=3)
+    _old_txt = _b64.urlsafe_b64encode(_json.dumps(_old).encode()).decode().rstrip("=")
+    ok &= check("an older link without patch/generations still decodes",
+                sp.decode_config(_old_txt)[6] == {})
+    try:
+        sp.config_from_dict({**_old, "init": "volcano"})
+        _bad_init = False
+    except ValueError:
+        _bad_init = True
+    ok &= check("a link with an unknown starting lattice is refused", _bad_init)
+
+    # ==========================================================================
+    # 12. Fixes from the 2026-10-22 bug check
+    # ==========================================================================
+    # The local replicator divides by the largest payoff gap two sites can show.
+    # On a BOUNDED lattice with total payoffs that is not n * spread: with every
+    # payoff positive, a busy interior site can out-earn a corner by more.
+    A_pos = np.array([[3.0, 4.0], [4.0, 5.0]])
+    m_pos = sp.Model(A=A_pos, rows=12, cols=12, wrap=False, payoff_mode="total",
+                     rule="proportional_imit")
+    _g = np.zeros((12, 12), np.int64)
+    _g[3:9, 3:9] = 1                    # interior block of the high-paid strategy
+    _, _pay, _, _ = sp.payoff_field(_g, A_pos, m_pos.offsets, wrap=False)
+    _nb_pay, _nb_ok = sp.neighbour_stack(_pay, m_pos.offsets, False)
+    _worst_gap = float(np.where(_nb_ok, _nb_pay - _pay[None], 0).max())
+    _pay_all = np.stack([sp.payoff_field(np.full((12, 12), s, np.int64), A_pos,
+                                         m_pos.offsets, wrap=False)[1] for s in (0, 1)])
+    ok &= check("bounded lattice: the payoff gap bound covers every site pair",
+                float(_pay_all.max() - _pay_all.min()) <= m_pos.max_payoff_gap() + 1e-12)
+    ok &= check("...where the torus formula n * spread would not",
+                float(_pay_all.max() - _pay_all.min()) > m_pos.n_neighbours * 2.0
+                and _worst_gap <= m_pos.max_payoff_gap())
+    ok &= check("on a torus the gap is still n * spread (runs unchanged)",
+                sp.Model(A=A_pos, rows=12, cols=12).max_payoff_gap() == 8 * 2.0)
+
+    # _roulette must never pick a zero-weight entry, even on a draw of exactly 0
+    class _Zero:
+        def random(self, shape):
+            return np.zeros(shape)
+    _w = np.array([[[0.0]], [[0.0]], [[2.0]]])
+    _v = np.array([[[False]], [[True]], [[True]]])
+    ok &= check("roulette ignores zero-weight entries on a zero draw",
+                int(sp._roulette(_w, _v, _Zero())[0, 0]) == 2)
+    class _One:
+        def random(self, shape):
+            return np.full(shape, 1.0 - 1e-17)
+    _w2 = np.array([[[0.1]], [[0.2]], [[0.0]]])
+    _v2 = np.array([[[True]], [[True]], [[False]]])
+    ok &= check("roulette never lands past the last positive weight",
+                int(sp._roulette(_w2, _v2, _One())[0, 0]) == 1)
+
+    ok &= check("a payoff matrix with nan or inf is refused",
+                raises("nan", A=np.array([[1.0, np.nan], [0.0, 1.0]]))
+                and raises("inf", A=np.array([[1.0, np.inf], [0.0, 1.0]])))
+    ok &= check("more strategies than int8 storage holds is refused",
+                raises("k", A=np.zeros((128, 128))))
+
+    # the browser player: one self-contained page, data intact
+    import player as _pl
+    import zlib as _zlib
+    _ps = sp.Sim(sp.Model(A=A0, rows=20, cols=30), seed=1, keep_grids=True).run(12)
+    _pd = _pl._payload(_ps, names=("Stag", "Hare"))
+    _raw = np.frombuffer(_zlib.decompress(_b64.b64decode(_pd["grids"])), np.uint8)
+    ok &= check("player data round-trips every lattice exactly",
+                np.array_equal(_raw.reshape(13, 20, 30), np.stack(_ps.grids)))
+    ok &= check("player numbers match the run (frequencies, r, frozen flags)",
+                approx(_pd["freq"], _ps.series("frequencies"), 1e-5)
+                and len(_pd["r"]) == 13 and _pd["frozen"][0] is False
+                and _pd["last"] == 12)
+    _page = _pl.player_html(_ps, names=("<!--<script>", "</script>&"))
+    _blob = _page.split('<script id="data" type="application/json">')[1].split("</script>")[0]
+    ok &= check("player page: a hostile name cannot close or reshape its script",
+                _page.count("</script>") == 2 and "__DATA__" not in _page
+                and "<" not in _blob and ">" not in _blob and "&" not in _blob
+                and _json.loads(_blob)["names"] == ["<!--<script>", "</script>&"])
+    try:
+        _pl._payload(_ps, names=("only one",))
+        _short = False
+    except ValueError:
+        _short = True
+    ok &= check("player refuses a names list of the wrong length", _short)
+    _m_nm = sp.config_from_dict({**sp.config_to_dict(_ps.model), "names": ["x"]})
+    ok &= check("a shared link with too few names drops them instead of crashing",
+                _m_nm[4] is None)
+    # very long runs are thinned to stay under marimo's 8 MB output limit
+    _long = sp.Sim(sp.Model(A=A0, rows=40, cols=40, mutation=0.3), seed=2,
+                   keep_grids=True).run(200)
+    _pg, _tag, _st = _pl.fit_player(_long, max_bytes=40_000)
+    _thin = _pl._payload(_long, stride=_st)
+    ok &= check(f"an oversized run is thinned to fit (every {_st}th generation)",
+                len(_tag) <= 40_000 and _st > 1 and _thin["gens"][0] == 0
+                and _thin["gens"][-1] == 200 and len(_thin["freq"]) == len(_thin["gens"]))
+    ok &= check("...and an ordinary run is not thinned",
+                _pl.fit_player(_ps)[2] == 1)
+    _p1 = sp.Sim(sp.Model(A=A0, cols=40, neighbourhood="1D line, 2 neighbours"),
+                 seed=0, keep_grids=True).run(5)
+    ok &= check("player handles a 1D run", _pl._payload(_p1)["is1d"] is True)
 
     print()
     print("ALL TESTS PASSED" if ok else "SOME TESTS FAILED")

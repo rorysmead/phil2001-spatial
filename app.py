@@ -11,15 +11,16 @@ dropdown, or another cell's output) changes. A cell's LAST expression is what it
 displays. So to change the UI you edit these cells; there is no manual "refresh".
 
 How it stays responsive: the whole run is simulated ONCE up to the generation
-limit and stored, and the generation control then scrubs through the stored run
-(`Sim.at`). Playing the animation is therefore just reading out frames, not
-re-simulating, which is what makes it usable in the browser.
+limit and stored, then handed to the player (player.py), a canvas in the page
+that plays, pauses and scrubs through the stored run itself. No Python runs
+between generations. The older design redrew a Matplotlib figure every frame,
+and swapping one PNG for the next made the picture blink between generations.
 
 The payoff matrix lives in a marimo STATE rather than in the widgets, because
-four different things can replace it -- picking a preset, changing the number of
-strategies, rolling random payoffs, or loading a shared link -- while the number
-boxes themselves are only for typing in. Whenever the state changes the boxes are
-rebuilt from it; typing in a box does not write back to the state.
+five different things can replace it -- picking a preset, changing the number of
+strategies, rolling random payoffs, loading a shared link, or pressing "Apply
+payoffs" -- and the number boxes are rebuilt from the state whenever it changes.
+The boxes sit in one form, so typing changes nothing until the form is applied.
 
 Run it locally:
     pip install marimo matplotlib numpy
@@ -28,11 +29,11 @@ Run it locally:
 
 Share with no install:
     marimo export html-wasm app.py -o build/ --mode run
-    cp spatial.py render.py build/          # REQUIRED, see the README
+    cp spatial.py render.py player.py build/    # REQUIRED, see the README
 """
 import marimo
 
-app = marimo.App(width="medium")
+app = marimo.App(width="full")
 
 
 @app.cell
@@ -43,7 +44,7 @@ def _():
     # three are silent -- the page simply stays blank:
     #
     #   1. A WASM export bundles the NOTEBOOK, not the files it imports, so
-    #      spatial.py and render.py are not in the build at all. They have to be
+    #      spatial.py, render.py and player.py are not in the build. They have to be
     #      copied next to index.html at deploy time (the README and the Pages
     #      workflow both do this) and then fetched into Pyodide's filesystem.
     #   2. The fetch must use the ABSOLUTE url from mo.notebook_location(). A
@@ -73,7 +74,7 @@ def _():
         import pyodide.http
 
         _base = str(mo.notebook_location()).rstrip("/")
-        for _name in ("spatial.py", "render.py"):
+        for _name in ("spatial.py", "render.py", "player.py"):
             pathlib.Path(_name).write_text(
                 pyodide.http.open_url(f"{_base}/{_name}").getvalue())
         if "." not in sys.path:
@@ -81,7 +82,8 @@ def _():
 
     sp = importlib.import_module("spatial")
     R = importlib.import_module("render")
-    return mo, np, R, sp
+    P = importlib.import_module("player")
+    return P, R, mo, np, sp
 
 
 @app.cell
@@ -91,16 +93,51 @@ def _(mo, sp):
     _raw = mo.query_params().get("cfg")
     try:
         shared = sp.decode_config(_raw) if _raw else None
-    except Exception:
+        # the widget offers k = 2..16 (one colour each); a bigger shared game
+        # is a link made elsewhere, and the k menu would refuse to build
+        if shared is not None and shared[0].k > 16:
+            raise ValueError("more strategies than the widget can show")
+        link_problem = None
+    except Exception as _exc:
         shared = None          # a corrupted link should not break the page
-    start_model, start_seed, start_init, start_probs, start_names, start_label = (
-        shared if shared else (None, 0, "random", None, None, None))
-    return start_model, start_seed, start_init, start_probs, start_names, start_label
+        link_problem = (f"The shared link could not be opened ({_exc}), so the "
+                        "default setup is shown instead.") if _raw else None
+    (start_model, start_seed, start_init, start_probs, start_names, start_label,
+     start_extras) = (shared if shared
+                      else (None, 0, "random", None, None, None, {}))
+
+    def clamp(value, lo, hi):
+        """Fit a shared value into a control's range, or the control will not build."""
+        return min(max(value, lo), hi)
+
+    # A link made in the notebook can hold values the controls cannot show.
+    # They are clamped to fit, which changes the run, so say which ones.
+    _adjusted = []
+    if start_model is not None:
+        _m = start_model
+        for _name, _val, _lo, _hi in (
+                ("lattice size", _m.cols, 10, 150),
+                ("update probability", _m.update_prob, 0.05, 1.0),
+                ("beta", _m.beta, 0.01, 2.0),
+                ("death rate", _m.death_rate, 0.05, 1.0),
+                ("mutation rate", _m.mutation, 0.0, 0.2),
+                ("patch size", start_extras.get("patch", 5), 1, 15),
+                ("generations", start_extras.get("generations", 150), 20, 1000)):
+            if clamp(_val, _lo, _hi) != _val:
+                _adjusted.append(f"{_name} {_val:g} -> {clamp(_val, _lo, _hi):g}")
+        if not _m.is_1d and _m.rows != _m.cols:
+            _adjusted.append(f"lattice {_m.rows}x{_m.cols} -> {_m.cols}x{_m.cols}")
+    if _adjusted:
+        link_problem = ("This shared run had settings the controls cannot show, "
+                        "so it is NOT the exact run that was shared: "
+                        + "; ".join(_adjusted) + ".")
+    return (clamp, link_problem, start_extras, start_init, start_label,
+            start_model, start_names, start_probs, start_seed)
 
 
 @app.cell
-def _(mo):
-    mo.md(
+def _(link_problem, mo):
+    _intro = mo.md(
         """
         # Spatial evolution
 
@@ -114,7 +151,9 @@ def _(mo):
         replicator explorer's `r` slider to that value and see whether a
         well-mixed population goes the same way.
         """
-    )
+    ).style({"max-width": "60rem"})
+    mo.vstack([_intro] + ([mo.md(link_problem).callout("warn")] if link_problem
+                          else []))
     return
 
 
@@ -136,8 +175,16 @@ def _(mo, np, sp, start_label, start_model, start_names):
         _init_game = {"A": np.asarray(_A, float), "names": tuple(_n),
                       "label": _default}
     # the single source of truth for the payoff matrix; the number boxes below
-    # are rebuilt from it whenever it changes
-    get_game, set_game = mo.state(_init_game)
+    # are rebuilt from it whenever it changes.
+    #
+    # allow_self_loops: the preset, k and random-payoff controls write this
+    # state from their own cell, and that cell also shows the "Currently
+    # loaded" line and sets the k dropdown from it. Without self loops marimo
+    # does not re-run the cell whose callback called the setter, so loading a
+    # 16-strategy preset left the line reading the old game and the dropdown
+    # reading k = 2. No cell calls set_game while it runs, only in callbacks,
+    # so a self loop cannot cycle.
+    get_game, set_game = mo.state(_init_game, allow_self_loops=True)
     return get_game, set_game
 
 
@@ -164,6 +211,8 @@ def _(get_game, mo, np, set_game, sp):
             return {"A": _A, "names": _n, "label": "random payoffs"}
         set_game(_random)
 
+    import html as _html
+
     preset = mo.ui.dropdown(options=list(sp.GAMES.keys()), value=None,
                             label="Load a preset", on_change=_use_preset)
     kdim = mo.ui.dropdown(options={str(i): i for i in range(2, 17)},
@@ -173,7 +222,8 @@ def _(get_game, mo, np, set_game, sp):
     mo.vstack([
         mo.hstack([preset, kdim, roll], justify="start", gap=1.2),
         # the dropdown resets to "--" after loading, so state the current game
-        mo.md(f"Currently loaded: **{get_game()['label']}** "
+        # the label can come from a shared link, so it is escaped, not markdown
+        mo.md(f"Currently loaded: **{_html.escape(str(get_game()['label']))}** "
               f"({len(get_game()['A'])} strategies)")
         .style({"font-size": "12px", "color": "#555"}),
     ], gap=0.3)
@@ -181,45 +231,60 @@ def _(get_game, mo, np, set_game, sp):
 
 
 @app.cell
-def _(get_game, mo):
-    # the editable payoff matrix, rebuilt from the state
+def _(get_game, mo, np, set_game):
+    # The editable payoff matrix, rebuilt from the state.
+    #
+    # All entries sit in ONE form, and "Apply payoffs" writes the whole matrix
+    # back to the state at once. Do not go back to one live box per entry: each
+    # box then triggers its own full re-simulation, and in the browser quickly
+    # typed edits get lost, so the run is drawn from a stale mix of old and new
+    # payoffs while the boxes show the new ones (found in the replicator tool).
+    # Writing back to the state is also what keeps an edit when k is changed.
+    import html as _html
+
     _g = get_game()
     names = _g["names"]
     n_strat = len(_g["A"])
-    # NOTE: no .style() on these. mo.ui.number(...).style(...) returns an Html
-    # WRAPPER rather than a UIElement, and mo.ui.array needs real elements --
-    # feeding it wrapped ones fails later with "'Html' object has no attribute
-    # '_clone'". Width is handled by the scrolling container instead.
-    matrix = mo.ui.array([
-        mo.ui.number(value=float(_g["A"][i][j]), step=0.05)
-        for i in range(n_strat) for j in range(n_strat)])
-    return matrix, n_strat, names
 
+    def _apply(v):
+        if v is None:
+            return
+        _A = np.array([[v[f"a{i}_{j}"] for j in range(n_strat)]
+                       for i in range(n_strat)], float)
+        if np.array_equal(_A, _g["A"]):
+            return
+        _label = _g["label"]
+        set_game({"A": _A, "names": names,
+                  "label": _label if _label.endswith("(edited)")
+                  else f"{_label} (edited)"})
 
-@app.cell
-def _(matrix, mo, n_strat, names):
-    _lw, _cw = ("70px", "92px") if n_strat > 6 else ("100px", "108px")
+    def _cell(text):
+        # braces would be read as form placeholders
+        return _html.escape(str(text)).replace("{", "&#123;").replace("}", "&#125;")
+
     _fs = "11px" if n_strat > 6 else "13px"
-    _head = mo.hstack([mo.md("").style({"width": _lw, "flex": "0 0 auto"}),
-                       *[mo.md(f"*{names[j]}*")
-                         .style({"width": _cw, "flex": "0 0 auto",
-                                 "font-size": "11px"})
-                         for j in range(n_strat)]], justify="start", gap=0.25)
-    _rows = [mo.hstack([mo.md(f"**{names[i]}**")
-                        .style({"width": _lw, "flex": "0 0 auto",
-                                "font-size": _fs}),
-                        *[mo.vstack([matrix[i * n_strat + j]])
-                          .style({"width": _cw, "flex": "0 0 auto"})
-                          for j in range(n_strat)]],
-                       justify="start", gap=0.25)
-             for i in range(n_strat)]
+    _head = "".join(f"<th style='font-weight:normal;font-style:italic;"
+                    f"font-size:11px;text-align:left'>{_cell(n)}</th>" for n in names)
+    _rows = "".join(
+        f"<tr><th style='text-align:left;font-size:{_fs};padding-right:8px;"
+        f"white-space:nowrap'>{_cell(names[i])}</th>"
+        + "".join(f"<td>{{a{i}_{j}}}</td>" for j in range(n_strat)) + "</tr>"
+        for i in range(n_strat))
+    _layout = ("<div style='overflow-x:auto;max-width:100%'><table>"
+               f"<tr><th></th>{_head}</tr>{_rows}</table></div>")
+    # no `step`: marimo snaps typed values to the step (1.33 -> 1.35 with 0.05)
+    payoff_form = mo.Html(_layout).batch(**{
+        f"a{i}_{j}": mo.ui.number(value=float(_g["A"][i][j]))
+        for i in range(n_strat) for j in range(n_strat)}).form(
+        submit_button_label="Apply payoffs", on_change=_apply,
+        validate=lambda v: ("Fill in every payoff." if v and any(
+            x is None for x in v.values()) else None))
     mo.vstack([
         mo.md("**Payoff matrix** — row = my strategy, column = theirs; the number "
-              "is what *I* earn. Edit any cell."),
-        mo.vstack([_head, *_rows], gap=0.25).style(
-            {"overflow-x": "auto", "max-width": "100%"}),
+              "is what *I* earn. Edit any cells, then press **Apply payoffs**."),
+        payoff_form,
     ])
-    return
+    return n_strat, names
 
 
 # ------------------------------------------------------------------------------
@@ -227,13 +292,13 @@ def _(matrix, mo, n_strat, names):
 # ------------------------------------------------------------------------------
 
 @app.cell
-def _(mo, sp, start_model):
+def _(clamp, mo, sp, start_model):
     _m0 = start_model
     # default 100: below about 100x100 the Nowak & May preset fixates at 0 or 1
     # instead of the coexistence it is famous for, which is a poor first
     # impression AND a misleading one (see nowak_may() in spatial.py)
-    size = mo.ui.slider(10, 150, value=(_m0.cols if _m0 else 100), step=5,
-                        label="Lattice size (n x n)", show_value=True)
+    size = mo.ui.slider(10, 150, value=(clamp(_m0.cols, 10, 150) if _m0 else 100),
+                        step=5, label="Lattice size (n x n)", show_value=True)
     hood = mo.ui.dropdown(options=list(sp.NEIGHBOURHOODS.keys()),
                           value=(_m0.neighbourhood if _m0 else "Moore (8)"),
                           label="Neighbourhood")
@@ -249,7 +314,7 @@ def _(mo, sp, start_model):
 
 
 @app.cell
-def _(mo, sp, start_model):
+def _(clamp, mo, sp, start_model):
     _m0 = start_model
     _rule_value = next(k for k, v in sp.RULE_LABELS.items()
                        if v == (_m0.rule if _m0 else "imitate_best"))
@@ -258,17 +323,20 @@ def _(mo, sp, start_model):
     schedule = mo.ui.dropdown(options=list(sp.SCHEDULES),
                               value=(_m0.schedule if _m0 else "synchronous"),
                               label="Who revises")
-    update_prob = mo.ui.slider(0.05, 1.0, value=(_m0.update_prob if _m0 else 0.3),
+    update_prob = mo.ui.slider(0.05, 1.0,
+                               value=(clamp(_m0.update_prob, 0.05, 1.0) if _m0 else 0.3),
                                step=0.05, label="...with probability",
                                show_value=True)
-    beta = mo.ui.slider(0.01, 2.0, value=(_m0.beta if _m0 else 0.1), step=0.01,
+    beta = mo.ui.slider(0.01, 2.0, value=(clamp(_m0.beta, 0.01, 2.0) if _m0 else 0.1),
+                        step=0.01,
                         label="Selection intensity  beta", show_value=True)
-    death_rate = mo.ui.slider(0.05, 1.0, value=(_m0.death_rate if _m0 else 0.5),
+    death_rate = mo.ui.slider(0.05, 1.0,
+                              value=(clamp(_m0.death_rate, 0.05, 1.0) if _m0 else 0.5),
                               step=0.05, label="Death rate", show_value=True)
     selection = mo.ui.slider(0.0, 1.0, value=(_m0.selection if _m0 else 1.0),
                              step=0.02, label="Selection strength  w",
                              show_value=True)
-    mutation = mo.ui.slider(0.0, 0.2, value=(_m0.mutation if _m0 else 0.0),
+    mutation = mo.ui.slider(0.0, 0.2, value=(clamp(_m0.mutation, 0.0, 0.2) if _m0 else 0.0),
                             step=0.005, label="Mutation rate", show_value=True)
     return rule, schedule, update_prob, beta, death_rate, selection, mutation
 
@@ -285,6 +353,12 @@ def _(beta, death_rate, mo, mutation, rule, schedule, selection, sp, update_prob
     if rule.value == "death_selection":
         _extra.append(death_rate)
     _sched = [schedule] + ([update_prob] if schedule.value == "subset" else [])
+    if schedule.value == "sequential":
+        _sched.append(mo.md(
+            "Sequential is the slow schedule: on a 100x100 lattice about half a "
+            "minute per 150 generations with Moore (8), and several minutes with a "
+            "radius-2 neighbourhood.")
+            .style({"font-size": "12px", "color": "#555", "margin": "0"}))
     rule_controls = mo.vstack([
         rule,
         mo.md(sp.RULE_NOTES[rule.value]).style({"font-size": "12px",
@@ -301,7 +375,7 @@ def _(mo, np, start_seed):
     # marimo and cannot be handed to another cell
     def roll_seed(_):
         set_seed(int(np.random.default_rng().integers(0, 1_000_000)))
-    return get_seed, set_seed, roll_seed
+    return get_seed, roll_seed, set_seed
 
 
 @app.cell
@@ -320,20 +394,22 @@ def _(mo, roll_seed):
 @app.cell
 def _(get_seed, mo, set_seed):
     # ...and the seed box gets its own cell too, reading the state
+    # a cleared box gives None; keep the last seed rather than crash the run
     seed = mo.ui.number(value=get_seed(), step=1, label="Random seed",
-                        on_change=set_seed)
+                        on_change=lambda v: set_seed(int(v)) if v is not None else None)
     return (seed,)
 
 
 @app.cell
-def _(mo, sp, start_init):
+def _(clamp, mo, sp, start_extras, start_init):
     init = mo.ui.dropdown(options=list(sp.INITIAL_CONDITIONS), value=start_init,
                           label="Starting lattice")
-    patch = mo.ui.slider(1, 15, value=5, step=1, label="...patch size",
-                         show_value=True)
-    gens = mo.ui.slider(20, 1000, value=150, step=10, label="Generations to run",
-                        show_value=True)
-    return init, patch, gens
+    patch = mo.ui.slider(1, 15, value=clamp(start_extras.get("patch", 5), 1, 15),
+                         step=1, label="...patch size", show_value=True)
+    gens = mo.ui.slider(20, 1000,
+                        value=clamp(start_extras.get("generations", 150), 20, 1000),
+                        step=10, label="Generations to run", show_value=True)
+    return gens, init, patch
 
 
 @app.cell
@@ -345,23 +421,31 @@ def _(gens, init, mo, new_seed, patch, seed):
 
 
 @app.cell
-def _(init, mo, n_strat, names, start_probs):
-    # starting proportions, one box per strategy; equal shares by default
+def _(clamp, init, mo, n_strat, names, start_probs):
+    # Starting proportions, one box per strategy, equal shares by default. One
+    # form for the same reason as the payoff matrix; until it is applied the
+    # defaults (or a shared link's values) are used.
+    import html as _html
+
     _even = round(100.0 / n_strat, 2)
-    _vals = (start_probs if (start_probs and len(start_probs) == n_strat)
-             else [_even] * n_strat)
-    proportions = mo.ui.array([
-        mo.ui.number(value=float(_vals[i]), start=0.0, stop=100.0, step=0.5)
-        for i in range(n_strat)])
-    _boxes = [mo.vstack([mo.md(f"<span style='font-size:11px'>{names[i]}</span>"),
-                         proportions[i]], gap=0.1).style({"width": "104px"})
-              for i in range(n_strat)]
+    start_shares = ([clamp(float(x), 0.0, 100.0) for x in start_probs]
+                    if (start_probs and len(start_probs) == n_strat)
+                    else [_even] * n_strat)
+    _boxes = "".join(
+        "<div style='display:inline-block;margin:0 10px 6px 0;vertical-align:top'>"
+        f"<div style='font-size:11px'>{_html.escape(str(names[i])).replace('{', '&#123;').replace('}', '&#125;')}</div>"
+        f"{{p{i}}}</div>" for i in range(n_strat))
+    proportion_form = mo.Html(f"<div>{_boxes}</div>").batch(**{
+        f"p{i}": mo.ui.number(value=float(start_shares[i]), start=0.0, stop=100.0)
+        for i in range(n_strat)}).form(
+        submit_button_label="Apply proportions",
+        validate=lambda v: ("Fill in every proportion." if v and any(
+            x is None for x in v.values()) else None))
     proportion_ui = (
         mo.vstack([mo.md("**Starting proportions (%)** — rescaled to sum to 100, "
-                         "so relative sizes are what matter."),
-                   mo.hstack(_boxes, justify="start", gap=0.4, wrap=True)])
+                         "so relative sizes are what matter."), proportion_form])
         if init.value == "random" else mo.md(""))
-    return proportions, proportion_ui
+    return proportion_form, proportion_ui, start_shares
 
 
 @app.cell
@@ -385,9 +469,9 @@ def _(lattice_controls, mo, proportion_ui, rule_controls, run_controls):
 # ------------------------------------------------------------------------------
 
 @app.cell
-def _(beta, death_rate, hood, matrix, mutation, n_strat, np, payoff_mode, rule,
-      schedule, selection, self_play, size, sp, update_prob, wrap):
-    A = np.array(matrix.value, float).reshape(n_strat, n_strat)
+def _(beta, death_rate, get_game, hood, mutation, payoff_mode, rule, schedule,
+      selection, self_play, size, sp, update_prob, wrap):
+    A = get_game()["A"]
     try:
         model = sp.Model(A=A, rows=size.value, cols=size.value,
                          neighbourhood=hood.value, wrap=wrap.value,
@@ -403,107 +487,72 @@ def _(beta, death_rate, hood, matrix, mutation, n_strat, np, payoff_mode, rule,
 
 
 @app.cell
-def _(gens, init, model, np, patch, proportions, seed, sp):
-    # simulate the WHOLE run once; the generation control then scrubs through it
-    probs = np.array(proportions.value, float)
-    if model is None or probs.sum() <= 0:
-        run, run_error = None, (None if model is not None
-                                else "starting proportions cannot all be zero")
+def _(get_seed, gens, init, mo, model, n_strat, np, patch, proportion_form, seed,
+      sp, start_shares):
+    # simulate the WHOLE run once; the player then plays and scrubs through it
+    # (a cleared seed box reads None: use the last seed it held)
+    run_seed = int(seed.value) if seed.value is not None else int(get_seed())
+    _v = proportion_form.value
+    probs = (np.array([_v[f"p{i}"] for i in range(n_strat)], float) if _v
+             else np.array(start_shares, float))
+    if model is None:
+        run, run_error = None, None
+    elif init.value == "random" and probs.sum() <= 0:
+        run, run_error = None, "starting proportions cannot all be zero"
     else:
-        run = sp.Sim(model, seed=int(seed.value), init=init.value,
-                     probs=probs, patch=int(patch.value),
-                     keep_grids=True).run(int(gens.value))
+        with mo.status.spinner(title="Running the simulation..."):
+            run = sp.Sim(model, seed=run_seed, init=init.value,
+                         probs=probs, patch=int(patch.value),
+                         keep_grids=True).run(int(gens.value))
         run_error = None
-    return run, run_error, probs
+    return probs, run, run_error, run_seed
 
 
 @app.cell
-def _(mo):
-    playing = mo.ui.switch(value=False, label="Play")
-    ticker = mo.ui.refresh(options=["0.1s", "0.25s", "0.5s", "1s"],
-                           default_interval="0.25s", label="")
-    return playing, ticker
-
-
-@app.cell
-def _(mo):
-    get_frame, set_frame = mo.state(0)
-    return get_frame, set_frame
-
-
-@app.cell
-def _(gens, playing, set_frame, ticker):
-    # auto-advance. This cell WRITES the frame counter but never reads it, which
-    # is what keeps marimo from seeing a cycle.
-    ticker
-    if playing.value:
-        set_frame(lambda t: (t + 1) % (int(gens.value) + 1))
-    return
-
-
-@app.cell
-def _(gens, mo, set_frame):
-    step_btn = mo.ui.button(label="Step",
-                            on_change=lambda _: set_frame(
-                                lambda t: min(t + 1, int(gens.value))))
-    back_btn = mo.ui.button(label="Back",
-                            on_change=lambda _: set_frame(lambda t: max(t - 1, 0)))
-    end_btn = mo.ui.button(label="To end",
-                           on_change=lambda _: set_frame(int(gens.value)))
-    reset_btn = mo.ui.button(label="Restart", on_change=lambda _: set_frame(0))
-    mo.hstack([reset_btn, back_btn, step_btn, end_btn, playing, ticker],
-              justify="start", gap=0.6)
-    return
-
-
-@app.cell
-def _(R, get_frame, mo, model_error, names, run, run_error):
+def _(P, mo, model_error, names, run, run_error):
+    # The run, played in the page by player.py: one canvas repainted in place,
+    # so nothing blinks between generations. Play / Step / the slider / the
+    # space and arrow keys all work inside it without calling back into Python.
     _problem = model_error or run_error
     if _problem is not None:
-        view = None
+        player_page = None
         picture = mo.md(f"**That will not run.** {_problem}").callout("warn")
     else:
-        view = run.at(get_frame())
-        picture = R.dashboard(view, names=names)
+        # fit_player keeps the page under marimo's 8 MB output limit by
+        # thinning generations on very long, badly compressing runs;
+        # P.iframe_html (inside it), not mo.iframe: see its docstring
+        player_page, _tag, _stride = P.fit_player(run, names=names)
+        picture = mo.Html(_tag)
     picture
-    return (view,)
+    return (player_page,)
 
 
 @app.cell
-def _(mo, np, view):
-    # the numbers, stated rather than left to be squinted off the plot
-    if view is None:
-        report = mo.md("")
-    else:
-        _s = view.snapshot()
-        _r = _s["assortment"]
-        _rtxt = "undefined (one strategy left)" if np.isnan(_r) else f"{_r:+.3f}"
-        report = mo.md(
-            f"""
-            | | |
-            |---|---|
-            | generation | {view.generation} |
-            | assortment `r` | **{_rtxt}** |
-            | mean payoff | {_s['mean_payoff']:.3f} |
-            | frozen? | {"yes -- nothing changed last generation" if view.frozen else "no"} |
-            """
-        )
-    report
-    return
-
-
-@app.cell
-def _(R, get_game, init, mo, model, names, probs, seed, sp, view):
-    # take the run away with you: the data, and a link that reproduces it exactly
-    if view is None:
+def _(P, R, get_game, gens, init, mo, model, names, patch, player_page, probs,
+      run, run_seed, sp):
+    # take the run away with you: the data, the animation, and a link that
+    # reproduces it exactly
+    if player_page is None:
         outputs = mo.md("")
     else:
-        _cfg = sp.encode_config(model, seed=int(seed.value), init=init.value,
+        _cfg = sp.encode_config(model, seed=run_seed, init=init.value,
                                 probs=probs, names=names,
-                                label=get_game()["label"])
+                                label=get_game()["label"], patch=int(patch.value),
+                                generations=int(gens.value))
         outputs = mo.vstack([
-            mo.download(data=R.series_csv(view, names).encode(),
-                        filename="spatial-run.csv", label="Download the data (CSV)"),
+            mo.hstack([
+                # the whole run, every generation (not just up to where it is paused)
+                mo.download(data=lambda: R.series_csv(run, names).encode(),
+                            filename="spatial-run.csv", mimetype="text/csv",
+                            label="Download the data (CSV)"),
+                # lazy, like the CSV: a long run's page is megabytes, and an eager
+                # download would ship it to the browser a second time every run.
+                # Every generation, even when the player above had to thin them.
+                mo.download(data=lambda: P.player_html(run, names=names).encode(),
+                            filename="spatial-run.html",
+                            mimetype="text/html",
+                            label="Download the animation (HTML, plays offline)"),
+            ], justify="start", gap=0.8),
             mo.md("**Share this exact run** -- add this to the end of the page "
                   "address, after a `?`:"),
             mo.ui.text_area(value=f"cfg={_cfg}", rows=3, full_width=True),
@@ -526,14 +575,20 @@ def _(mo):
            set the lattice to 20 -- it fixates at 0 or 1 instead. The published
            result needs both the self-interaction and the big lattice.
         2. **Does the clock matter?** Same setup, change *Who revises* from
-           synchronous to sequential. Huberman & Glance argued in 1993 that the
-           spatial chaos depends on every cell moving in lockstep.
-        3. **Where selection acts.** Run a Prisoner's Dilemma under
-           *death-birth* and then under *death-selection*, with the same
-           selection strength w. Same births, same deaths, same lattice -- only
-           the step that selection acts on has moved. Then turn w down to 0.02
-           and raise the benefit: weak selection is where the b/c > k result
-           lives, and at full strength cooperation loses at every b/c.
+           synchronous to sequential (it takes longer to compute). Huberman &
+           Glance argued in 1993 that the spatial chaos depends on every cell
+           moving in lockstep.
+        3. **Where selection acts.** Switch *Play against yourself* off first:
+           it pays every cooperator an extra b - c, and with it on and a high
+           benefit (b = 8, c = 1) cooperation wins even at full strength, the
+           opposite of the published pattern. Then run
+           the *Prisoner's Dilemma (b=1.9, c=1)* under *death-birth* and then
+           under *death-selection*, with the same selection strength w. Same
+           births, same deaths, same lattice -- only the step that selection acts
+           on has moved. Then turn w down to 0.02 and raise the benefit b (top
+           row is b - c, -c; bottom row is b, 0): weak selection is where the
+           b/c > k result lives, and at full strength cooperation loses at every
+           b/c.
         4. **Does meaning evolve?** Preset *Lewis signalling*, 16 strategies.
            Only two of them (`01|01` and `10|10`) are signalling systems, where
            the sender's map is one-to-one and the receiver inverts it. Does the
@@ -551,7 +606,7 @@ def _(mo):
            well-mixed model with that much correlation agrees, space mattered
            only through assortment. If it does not, that gap is the finding.
         """
-    )
+    ).style({"max-width": "60rem"})
     return
 
 
