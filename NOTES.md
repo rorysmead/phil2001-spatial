@@ -30,7 +30,7 @@ Both import the same model core (the widget also uses `player.py` to play runs):
 - **`render.py`** — the drawing layer (Matplotlib). No model here.
 - **`player.py`** — plays a finished run in the browser on a canvas (no Matplotlib, no
   model). The widget uses it so nothing blinks between generations.
-- **`tests.py`** — 136 correctness checks. Run `python3 tests.py`.
+- **`tests.py`** — 141 correctness checks. Run `python3 tests.py`.
 
 ## What it does
 
@@ -58,7 +58,10 @@ Both import the same model core (the widget also uses `player.py` to play runs):
 - **Starting proportions**: a percentage box per strategy (equal shares by default,
   rescaled to sum to 100), or structured starts — single mutant, patch, stripes,
   checkerboard, halves — or any array you build yourself.
-- **Runs up to 1000 generations**, with a one-click random seed.
+- **Runs up to 2000 generations** on the slider, and *Run 500 more generations* carries a
+  run on from where it ended, up to 5000 in all. The extension uses the same simulation and
+  random stream, so it is exactly the run a longer setting gives, and its share link
+  reproduces it. One-click random seed.
 - **Seven update rules**, grouped by what they assume about the players — the grouping is
   itself the lesson, because a rule is a behavioural hypothesis, not a technicality:
   - *imitation, deterministic*: imitate the best (the Nowak–May rule);

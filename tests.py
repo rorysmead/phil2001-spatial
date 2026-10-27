@@ -653,6 +653,38 @@ def main():
                  seed=0, keep_grids=True).run(5)
     ok &= check("player handles a 1D run", _pl._payload(_p1)["is1d"] is True)
 
+    # "Run 500 more": carrying a run on must give exactly the longer run, under
+    # every schedule and with the random stream in use (stochastic rule, mutation)
+    _same = True
+    for _sch in sp.SCHEDULES:
+        _mx = sp.Model(A=A0, rows=12, cols=12, rule="fermi", schedule=_sch,
+                       mutation=0.05)
+        _one = sp.Sim(_mx, seed=5, keep_grids=True).run(30)
+        _two = sp.Sim(_mx, seed=5, keep_grids=True).run(10).run(20)
+        _same &= (len(_one.grids) == len(_two.grids) == 31
+                  and all(np.array_equal(x, y) for x, y in zip(_one.grids, _two.grids))
+                  and approx(_one.series("frequencies"), _two.series("frequencies"))
+                  and approx(_one.series("mean_payoff"), _two.series("mean_payoff")))
+    ok &= check("a run carried on is the same run as one set longer (every schedule)",
+                _same)
+    # ...and the player opens where the extension began
+    _ps0 = _pl._payload(_ps)
+    _ps8 = _pl._payload(_ps, start=8, autoplay=True)
+    ok &= check("player opens at generation 0 and paused by default",
+                _ps0["start"] == 0 and _ps0["autoplay"] is False)
+    ok &= check("player can open part-way through and play on",
+                _ps8["gens"][_ps8["start"]] == 8 and _ps8["autoplay"] is True)
+    _thin8 = _pl._payload(_long, stride=7, start=150)
+    ok &= check("a thinned player still has the generation it opens at",
+                _thin8["gens"][_thin8["start"]] == 150
+                and _thin8["gens"] == sorted(_thin8["gens"])
+                and len(_thin8["freq"]) == len(_thin8["gens"]) == len(_thin8["frozen"]))
+    ok &= check("player clamps an opening generation past the end",
+                _pl._payload(_ps, start=99)["start"] == _ps0["last"])
+    ok &= check("a shared link keeps a run longer than the slider reaches",
+                sp.decode_config(sp.encode_config(_ps.model, generations=3500))[6]
+                == {"generations": 3500})
+
     print()
     print("ALL TESTS PASSED" if ok else "SOME TESTS FAILED")
     return 0 if ok else 1
