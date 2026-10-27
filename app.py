@@ -15,6 +15,8 @@ limit and stored, then handed to the player (player.py), a canvas in the page
 that plays, pauses and scrubs through the stored run itself. No Python runs
 between generations. The older design redrew a Matplotlib figure every frame,
 and swapping one PNG for the next made the picture blink between generations.
+"Run 500 more" carries the same simulation on from where it ended (same random
+stream), so an extended run is exactly the run a longer slider setting gives.
 
 The payoff matrix lives in a marimo STATE rather than in the widgets, because
 five different things can replace it -- picking a preset, changing the number of
@@ -106,6 +108,11 @@ def _(mo, sp):
      start_extras) = (shared if shared
                       else (None, 0, "random", None, None, None, {}))
 
+    # How long a run can be: the slider reaches SLIDER_MAX, and "Run 500 more"
+    # (MORE at a time) carries a run on up to MAX_GENERATIONS in all. The cap is
+    # memory: every generation's lattice is kept, 22 KB each at 150 x 150.
+    SLIDER_MAX, MORE, MAX_GENERATIONS = 2000, 500, 5000
+
     def clamp(value, lo, hi):
         """Fit a shared value into a control's range, or the control will not build."""
         return min(max(value, lo), hi)
@@ -122,17 +129,24 @@ def _(mo, sp):
                 ("death rate", _m.death_rate, 0.05, 1.0),
                 ("mutation rate", _m.mutation, 0.0, 0.2),
                 ("patch size", start_extras.get("patch", 5), 1, 15),
-                ("generations", start_extras.get("generations", 150), 20, 1000)):
+                ("generations", start_extras.get("generations", 150), 20,
+                 MAX_GENERATIONS)):
             if clamp(_val, _lo, _hi) != _val:
                 _adjusted.append(f"{_name} {_val:g} -> {clamp(_val, _lo, _hi):g}")
         if not _m.is_1d and _m.rows != _m.cols:
             _adjusted.append(f"lattice {_m.rows}x{_m.cols} -> {_m.cols}x{_m.cols}")
+    # a shared run longer than the slider reaches opens as the slider at its
+    # top plus that many generations "more", so it replays exactly
+    _total = clamp(start_extras.get("generations", 150), 20, MAX_GENERATIONS)
+    start_gens = clamp(_total, 20, SLIDER_MAX)
+    start_more = _total - start_gens
     if _adjusted:
         link_problem = ("This shared run had settings the controls cannot show, "
                         "so it is NOT the exact run that was shared: "
                         + "; ".join(_adjusted) + ".")
-    return (clamp, link_problem, start_extras, start_init, start_label,
-            start_model, start_names, start_probs, start_seed)
+    return (MAX_GENERATIONS, MORE, SLIDER_MAX, clamp, link_problem,
+            start_extras, start_gens, start_init, start_label, start_model,
+            start_more, start_names, start_probs, start_seed)
 
 
 @app.cell
@@ -401,13 +415,12 @@ def _(get_seed, mo, set_seed):
 
 
 @app.cell
-def _(clamp, mo, sp, start_extras, start_init):
+def _(SLIDER_MAX, clamp, mo, sp, start_extras, start_gens, start_init):
     init = mo.ui.dropdown(options=list(sp.INITIAL_CONDITIONS), value=start_init,
                           label="Starting lattice")
     patch = mo.ui.slider(1, 15, value=clamp(start_extras.get("patch", 5), 1, 15),
                          step=1, label="...patch size", show_value=True)
-    gens = mo.ui.slider(20, 1000,
-                        value=clamp(start_extras.get("generations", 150), 20, 1000),
+    gens = mo.ui.slider(20, SLIDER_MAX, value=start_gens,
                         step=10, label="Generations to run", show_value=True)
     return gens, init, patch
 
@@ -487,29 +500,67 @@ def _(beta, death_rate, get_game, hood, mutation, payoff_mode, rule, schedule,
 
 
 @app.cell
-def _(get_seed, gens, init, mo, model, n_strat, np, patch, proportion_form, seed,
-      sp, start_shares):
+def _(mo, start_more):
+    # Generations added by "Run 500 more", and the setup they were added to
+    # ("key", see below). None is the setup the page opened with, so a shared
+    # link to a long run gets its extra generations on the first run.
+    get_more, set_more = mo.state({"key": None, "extra": int(start_more)})
+    # The last run, kept between re-runs of the run cell so that "Run 500 more"
+    # carries it on from where it ended instead of re-running from generation
+    # 0. Changed in place by that cell; nothing reacts to it.
+    run_cache = {}
+    return get_more, run_cache, set_more
+
+
+@app.cell
+def _(MAX_GENERATIONS, get_more, get_seed, gens, init, mo, model, n_strat, np,
+      patch, proportion_form, run_cache, seed, sp, start_shares):
     # simulate the WHOLE run once; the player then plays and scrubs through it
     # (a cleared seed box reads None: use the last seed it held)
     run_seed = int(seed.value) if seed.value is not None else int(get_seed())
     _v = proportion_form.value
     probs = (np.array([_v[f"p{i}"] for i in range(n_strat)], float) if _v
              else np.array(start_shares, float))
+    run_key, run_from = None, 0
     if model is None:
         run, run_error = None, None
     elif init.value == "random" and probs.sum() <= 0:
         run, run_error = None, "starting proportions cannot all be zero"
     else:
-        with mo.status.spinner(title="Running the simulation..."):
+        # Everything that decides the run, as one string. Extra generations
+        # belong to the setup they were added to: change any control and they
+        # are dropped, and they stay dropped if the control is put back.
+        run_key = sp.encode_config(model, seed=run_seed, init=init.value,
+                                   probs=probs, patch=int(patch.value),
+                                   generations=int(gens.value))
+        run_cache.setdefault("first_key", run_key)
+        _more = get_more()
+        _owner = run_cache["first_key"] if _more["key"] is None else _more["key"]
+        if _owner != run_key:
+            run_cache["spent"] = _more
+        _extra = (_more["extra"] if _owner == run_key
+                  and run_cache.get("spent") is not _more else 0)
+        _total = min(int(gens.value) + _extra, MAX_GENERATIONS)
+        _old = run_cache.get("sim") if run_cache.get("key") == run_key else None
+        if _old is not None and _old.generation <= _total:
+            # the same Sim, so the same random stream: carrying a run on gives
+            # exactly the run a longer setting would have given from the start
+            run = _old
+            run_from = run.generation if run.generation < _total else 0
+        else:
             run = sp.Sim(model, seed=run_seed, init=init.value,
-                         probs=probs, patch=int(patch.value),
-                         keep_grids=True).run(int(gens.value))
+                         probs=probs, patch=int(patch.value), keep_grids=True)
+        if run.generation < _total:
+            with mo.status.spinner(
+                    title=f"Running generations {run.generation + 1}-{_total}..."):
+                run.run(_total - run.generation)
+        run_cache.update(key=run_key, sim=run)
         run_error = None
-    return probs, run, run_error, run_seed
+    return probs, run, run_error, run_from, run_key, run_seed
 
 
 @app.cell
-def _(P, mo, model_error, names, run, run_error):
+def _(P, mo, model_error, names, run, run_error, run_from):
     # The run, played in the page by player.py: one canvas repainted in place,
     # so nothing blinks between generations. Play / Step / the slider / the
     # space and arrow keys all work inside it without calling back into Python.
@@ -520,16 +571,46 @@ def _(P, mo, model_error, names, run, run_error):
     else:
         # fit_player keeps the page under marimo's 8 MB output limit by
         # thinning generations on very long, badly compressing runs;
-        # P.iframe_html (inside it), not mo.iframe: see its docstring
-        player_page, _tag, _stride = P.fit_player(run, names=names)
+        # P.iframe_html (inside it), not mo.iframe: see its docstring.
+        # After "Run 500 more" it opens where the run had ended and plays on.
+        player_page, _tag, _stride = P.fit_player(run, names=names,
+                                                  start=run_from,
+                                                  autoplay=run_from > 0)
         picture = mo.Html(_tag)
     picture
     return (player_page,)
 
 
 @app.cell
-def _(P, R, get_game, gens, init, mo, model, names, patch, player_page, probs,
-      run, run_seed, sp):
+def _(MAX_GENERATIONS, MORE, gens, mo, player_page, run, run_key, set_more):
+    # "Run 500 more": carry this run on from where it ended. In its own cell,
+    # under the player, like the seed button; it writes the state the run cell
+    # reads, and the run cell extends the stored Sim rather than starting over.
+    if player_page is None:
+        more_ui = mo.md("")
+    else:
+        _total = run.generation
+        _next = min(_total + MORE, MAX_GENERATIONS)
+        more = mo.ui.button(
+            # near the cap the last step is shorter; at the cap it is disabled
+            label=f"Run {_next - _total or MORE} more generations",
+            disabled=_next <= _total,
+            on_change=lambda _: set_more({"key": run_key,
+                                          "extra": _next - int(gens.value)}))
+        _note = (f"{_total} generations so far. "
+                 + (f"A run can go to {MAX_GENERATIONS} in all."
+                    if _next > _total else
+                    f"That is the most one run can go ({MAX_GENERATIONS})."))
+        more_ui = mo.hstack([more, mo.md(_note).style(
+            {"font-size": "12px", "color": "#555"})], justify="start", gap=0.8,
+            align="center")
+    more_ui
+    return
+
+
+@app.cell
+def _(P, R, get_game, init, mo, model, names, patch, player_page, probs, run,
+      run_seed, sp):
     # take the run away with you: the data, the animation, and a link that
     # reproduces it exactly
     if player_page is None:
@@ -538,7 +619,8 @@ def _(P, R, get_game, gens, init, mo, model, names, patch, player_page, probs,
         _cfg = sp.encode_config(model, seed=run_seed, init=init.value,
                                 probs=probs, names=names,
                                 label=get_game()["label"], patch=int(patch.value),
-                                generations=int(gens.value))
+                                # the whole run, extensions included
+                                generations=int(run.generation))
         outputs = mo.vstack([
             mo.hstack([
                 # the whole run, every generation (not just up to where it is paused)

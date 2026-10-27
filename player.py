@@ -24,12 +24,16 @@ import numpy as np
 from render import PALETTE
 
 
-def _payload(sim, names=None, stride=1):
+def _payload(sim, names=None, stride=1, start=0, autoplay=False):
     """The run as plain data: compressed lattices plus the per-generation numbers.
 
     `stride` keeps every stride-th generation (and always the last), for runs
     too big to ship whole; the numbers are kept at the same generations, and
     "gens" says which generation each frame is.
+
+    `start` is the generation the player opens at, and `autoplay` starts it
+    playing from there. The widget uses both after "Run 500 more", so the run
+    carries on from where it ended rather than jumping back to generation 0.
     """
     m = sim.model
     if not sim.grids:
@@ -41,9 +45,9 @@ def _payload(sim, names=None, stride=1):
     if len(names) != m.k:
         raise ValueError(f"{len(names)} names for {m.k} strategies")
     n = len(sim.grids)
-    keep = list(range(0, n, max(1, int(stride))))
-    if keep[-1] != n - 1:
-        keep.append(n - 1)
+    start = int(np.clip(start, 0, n - 1))
+    # the opening generation is always a frame, even when a stride skips it
+    keep = sorted(set(range(0, n, max(1, int(stride)))) | {start, n - 1})
     grids = np.stack([sim.grids[g] for g in keep]).astype(np.uint8)
     # "frozen" compares with the generation before, which a stride may have skipped
     frozen = [False] + [bool(np.array_equal(sim.grids[g], sim.grids[g - 1]))
@@ -52,6 +56,7 @@ def _payload(sim, names=None, stride=1):
     return {
         "rows": m.rows, "cols": m.cols, "k": m.k, "is1d": bool(m.is_1d),
         "last": len(keep) - 1, "gens": keep, "stride": max(1, int(stride)),
+        "start": keep.index(start), "autoplay": bool(autoplay),
         "names": [str(x) for x in names],
         "colors": PALETTE[:m.k],
         # deflate (zlib) + base64: lattices compress very well, and the browser
@@ -64,13 +69,15 @@ def _payload(sim, names=None, stride=1):
     }
 
 
-def player_html(sim, names=None, max_side=760, stride=1):
+def player_html(sim, names=None, max_side=760, stride=1, start=0, autoplay=False):
     """A standalone HTML page that plays `sim`.
 
     `max_side` is the largest the lattice is drawn, in CSS pixels; it shrinks to
     fit narrower windows. `stride` > 1 keeps only every stride-th generation.
+    `start` and `autoplay`: where the player opens, and whether it plays on.
     """
-    data = json.dumps(_payload(sim, names, stride), separators=(",", ":"))
+    data = json.dumps(_payload(sim, names, stride, start, autoplay),
+                      separators=(",", ":"))
     # Strategy names can arrive in a shared link, and the data sits inside a
     # <script> element. Escaping every <, > and & keeps any name (say one
     # containing "</script>" or "<!--<script>") from ending or reshaping that
@@ -81,7 +88,8 @@ def player_html(sim, names=None, max_side=760, stride=1):
             .replace("__DATA__", data))
 
 
-def fit_player(sim, names=None, max_bytes=7_000_000, max_side=760):
+def fit_player(sim, names=None, max_bytes=7_000_000, max_side=760, start=0,
+               autoplay=False):
     """(page, iframe tag, stride) with the iframe tag under `max_bytes`.
 
     marimo replaces any cell output over 8 MB with a "your output is too large"
@@ -91,7 +99,7 @@ def fit_player(sim, names=None, max_bytes=7_000_000, max_side=760):
     """
     stride = 1
     while True:
-        page = player_html(sim, names, max_side, stride)
+        page = player_html(sim, names, max_side, stride, start, autoplay)
         tag = iframe_html(page)
         if len(tag) <= max_bytes or stride >= len(sim.grids):
             return page, tag, stride
@@ -494,7 +502,8 @@ _TEMPLATE = r"""<!doctype html>
   }
   inflate(D.grids).then((g) => {
     if (g.length !== (LAST + 1) * CELLS) throw new Error("lattice data is the wrong size");
-    grids = g; prepareLattice(); layout();
+    grids = g; frame = D.start; prepareLattice(); layout();
+    if (D.autoplay) setPlaying(true);
   }).catch((e) => { $("msg").textContent = "Could not load the run: " + e.message; });
 })();
 </script>
