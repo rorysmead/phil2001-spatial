@@ -304,7 +304,10 @@ def _(clamp, mo, sp, start_model):
                           label="Neighbourhood")
     wrap = mo.ui.checkbox(value=(_m0.wrap if _m0 else True),
                           label="Wrap edges (torus)")
-    self_play = mo.ui.checkbox(value=(_m0.self_play if _m0 else True),
+    # off by default, as in the model: self-play adds A[i, i] to each payoff,
+    # which is not a constant across cells, so it changes outcomes (and breaks
+    # ties a student would expect, e.g. on a straight PD frontier)
+    self_play = mo.ui.checkbox(value=(_m0.self_play if _m0 else False),
                                label="Play against yourself too")
     payoff_mode = mo.ui.radio(options=["total", "average"],
                               value=(_m0.payoff_mode if _m0 else "total"),
@@ -570,18 +573,19 @@ def _(mo):
 
         1. **Nowak & May's result, and what it rests on.** Preset *Prisoner's
            Dilemma - Nowak & May*, Moore (8), synchronous, imitate the best, size
-           100. Cooperators survive at around 30%. Now switch *Play against
-           yourself* off: cooperation dies completely. Then turn it back on and
-           set the lattice to 20 -- it fixates at 0 or 1 instead. The published
-           result needs both the self-interaction and the big lattice.
-        2. **Does the clock matter?** Same setup, change *Who revises* from
+           100. Cooperation dies completely. Now switch *Play against yourself*
+           on, as Nowak & May did: cooperators survive at around 30%. Then set the
+           lattice to 20 -- it fixates at 0 or 1 instead. The published result
+           needs both the self-interaction and the big lattice.
+        2. **Does the clock matter?** Same setup (self-play on, size 100),
+           change *Who revises* from
            synchronous to sequential (it takes longer to compute). Huberman &
            Glance argued in 1993 that the spatial chaos depends on every cell
            moving in lockstep.
-        3. **Where selection acts.** Switch *Play against yourself* off first:
-           it pays every cooperator an extra b - c, and with it on and a high
-           benefit (b = 8, c = 1) cooperation wins even at full strength, the
-           opposite of the published pattern. Then run
+        3. **Where selection acts.** Keep *Play against yourself* off: it pays
+           every cooperator an extra b - c, and with it on and a high benefit
+           (b = 8, c = 1) cooperation wins even at full strength, the opposite of
+           the published pattern. Run
            the *Prisoner's Dilemma (b=1.9, c=1)* under *death-birth* and then
            under *death-selection*, with the same selection strength w. Same
            births, same deaths, same lattice -- only the step that selection acts

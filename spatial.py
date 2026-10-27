@@ -499,9 +499,8 @@ def rule_death_birth(grid, pf, model, rng):
     That table is WITHOUT self-interaction (self_play=False, the Model default).
     Self-play pays every cooperator an extra b - c and every defector 0, and it
     reverses the full-strength column: at b/c = 8 and w = 1, cooperators reach
-    0.73 and 0.79 on two seeds (0.32 and 0.30 at w = 0.02). The widget turns
-    self-play on by default for Nowak & May, so switch it off before comparing
-    with this table.
+    0.73 and 0.79 on two seeds (0.32 and 0.30 at w = 0.02). Leave it off (the
+    default here and in the widget) when comparing with this table.
 
     DO NOT READ THAT TABLE AS A REPLICATION. Ohtsuki et al.'s claim is about a
     FIXATION PROBABILITY -- a single cooperative mutant fixes more often than a

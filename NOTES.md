@@ -164,10 +164,9 @@ the rule collapses towards "imitate the best", and defection takes everything at
 Turn selection down and cooperation appears and rises with b/c. See `rule_death_birth`'s
 docstring for the table — and note it is *consistent with* the condition, not a test of it,
 since the published claim is about fixation probability and the table is a frequency.
-The table is **without self-interaction**. The widget turns self-play on by default (for
-Nowak & May), and self-play reverses the full-strength column: it pays each cooperator an
-extra b − c, and at b/c = 8, w = 1 cooperators reach 0.73 and 0.79 on two seeds. Switch it
-off before comparing.
+The table is **without self-interaction**, the default in both the model and the widget.
+Self-play reverses the full-strength column: it pays each cooperator an extra b − c, and at
+b/c = 8, w = 1 cooperators reach 0.73 and 0.79 on two seeds.
 
 ## Running it
 
